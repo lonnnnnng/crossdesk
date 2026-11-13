@@ -149,6 +149,14 @@ int ConfigCenter::Load() {
       *ini_, section_, "direct_start_bitrate_bps", kDefaultDirectStartBitrateBps);
   relay_start_bitrate_bps_ = ReadStartingBitrate(
       *ini_, section_, "relay_start_bitrate_bps", kDefaultRelayStartBitrateBps);
+  disable_receiver_padding_probing_ = ini_->GetBoolValue(
+      section_, "disable_receiver_padding_probing",
+      kDefaultDisableReceiverPaddingProbing);
+  if (!ini_->GetValue(section_, "disable_receiver_padding_probing", nullptr)) {
+    ini_->SetBoolValue(section_, "disable_receiver_padding_probing",
+                      disable_receiver_padding_probing_);
+    persist_config_migration = true;
+  }
   // Populate old configurations and repair invalid values so the file shows
   // the estimates that will actually be used for subsequent connections.
   for (const auto& entry :
@@ -276,6 +284,8 @@ int ConfigCenter::Save() {
   ini_->SetLongValue(section_, "turn_mode", static_cast<long>(turn_mode_));
   ini_->SetLongValue(section_, "direct_start_bitrate_bps", direct_start_bitrate_bps_);
   ini_->SetLongValue(section_, "relay_start_bitrate_bps", relay_start_bitrate_bps_);
+  ini_->SetBoolValue(section_, "disable_receiver_padding_probing",
+                    disable_receiver_padding_probing_);
   ini_->SetBoolValue(section_, "enable_turn",
                     turn_mode_ != TURN_MODE::DISABLED);
   ini_->SetBoolValue(section_, "enable_srtp", true);
@@ -326,6 +336,8 @@ std::string ConfigCenter::ExportSharedHostConfig() const {
   host.SetLongValue(section_, "turn_mode", static_cast<long>(turn_mode_));
   host.SetLongValue(section_, "direct_start_bitrate_bps", direct_start_bitrate_bps_);
   host.SetLongValue(section_, "relay_start_bitrate_bps", relay_start_bitrate_bps_);
+  host.SetBoolValue(section_, "disable_receiver_padding_probing",
+                    disable_receiver_padding_probing_);
   host.SetLongValue(section_, "video_encode_format", static_cast<long>(video_encode_format_));
   host.SetBoolValue(section_, "trusted_devices_only", trusted_devices_only_.load());
   host.SetBoolValue(section_, "lock_on_disconnect", lock_on_disconnect_.load());
@@ -351,6 +363,9 @@ int ConfigCenter::ApplySharedHostConfig(const std::string& contents) {
       host, section_, "direct_start_bitrate_bps", kDefaultDirectStartBitrateBps);
   const int relay_bps = ReadStartingBitrate(
       host, section_, "relay_start_bitrate_bps", kDefaultRelayStartBitrateBps);
+  const bool disable_receiver_padding_probing = host.GetBoolValue(
+      section_, "disable_receiver_padding_probing",
+      kDefaultDisableReceiverPaddingProbing);
   const bool trusted = host.GetBoolValue(section_, "trusted_devices_only", false);
   const bool lock = host.GetBoolValue(section_, "lock_on_disconnect", true);
   MiniRtcSignalServerAddress address{};
@@ -362,6 +377,8 @@ int ConfigCenter::ApplySharedHostConfig(const std::string& contents) {
                    {"turn_mode", std::to_string(turn)}, {"video_encode_format", std::to_string(codec)},
                    {"direct_start_bitrate_bps", std::to_string(direct_bps)},
                    {"relay_start_bitrate_bps", std::to_string(relay_bps)},
+                   {"disable_receiver_padding_probing",
+                    disable_receiver_padding_probing ? "true" : "false"},
                    {"trusted_devices_only", trusted ? "true" : "false"},
                    {"lock_on_disconnect", lock ? "true" : "false"}}) != 0) return -1;
   enable_self_hosted_ = self_hosted;
@@ -370,6 +387,7 @@ int ConfigCenter::ApplySharedHostConfig(const std::string& contents) {
   turn_mode_ = static_cast<TURN_MODE>(turn);
   direct_start_bitrate_bps_ = direct_bps;
   relay_start_bitrate_bps_ = relay_bps;
+  disable_receiver_padding_probing_ = disable_receiver_padding_probing;
   video_encode_format_ = static_cast<VIDEO_ENCODE_FORMAT>(codec);
   trusted_devices_only_.store(trusted);
   lock_on_disconnect_.store(lock);
@@ -662,6 +680,10 @@ int ConfigCenter::GetDirectStartBitrateBps() const {
 
 int ConfigCenter::GetRelayStartBitrateBps() const {
   return relay_start_bitrate_bps_;
+}
+
+bool ConfigCenter::IsReceiverPaddingProbingDisabled() const {
+  return disable_receiver_padding_probing_;
 }
 
 bool ConfigCenter::IsForceRelay() const {
