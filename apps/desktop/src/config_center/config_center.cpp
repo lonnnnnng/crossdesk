@@ -1,6 +1,7 @@
 #include "config_center.h"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -35,6 +36,21 @@ namespace {
 bool IsValidTurnModeValue(long value) {
   return value >= static_cast<long>(ConfigCenter::TURN_MODE::DISABLED) &&
          value <= static_cast<long>(ConfigCenter::TURN_MODE::FORCE_TCP);
+}
+
+int ReadStartingBitrate(const CSimpleIniA& ini, const char* section,
+                        const char* key, int fallback) {
+  const char* value = ini.GetValue(section, key, nullptr);
+  if (!value) return fallback;
+  const char* end = value + std::strlen(value);
+  int bps = 0;
+  const auto parsed = std::from_chars(value, end, bps);
+  if (parsed.ec != std::errc{} || parsed.ptr != end ||
+      bps < 300'000 || bps > 20'000'000) {
+    LOG_WARN("Invalid {} configuration, using {} bps", key, fallback);
+    return fallback;
+  }
+  return bps;
 }
 
 }  // namespace
@@ -128,6 +144,20 @@ int ConfigCenter::Load() {
   if (!ini_->GetBoolValue(section_, "enable_srtp", false)) {
     ini_->SetBoolValue(section_, "enable_srtp", true);
     persist_config_migration = true;
+  }
+  direct_start_bitrate_bps_ = ReadStartingBitrate(
+      *ini_, section_, "direct_start_bitrate_bps", kDefaultDirectStartBitrateBps);
+  relay_start_bitrate_bps_ = ReadStartingBitrate(
+      *ini_, section_, "relay_start_bitrate_bps", kDefaultRelayStartBitrateBps);
+  // Populate old configurations and repair invalid values so the file shows
+  // the estimates that will actually be used for subsequent connections.
+  for (const auto& entry :
+       {std::make_pair("direct_start_bitrate_bps", direct_start_bitrate_bps_),
+        std::make_pair("relay_start_bitrate_bps", relay_start_bitrate_bps_)}) {
+    if (std::to_string(entry.second) != ini_->GetValue(section_, entry.first, "")) {
+      ini_->SetLongValue(section_, entry.first, entry.second);
+      persist_config_migration = true;
+    }
   }
   enable_self_hosted_ =
       ini_->GetBoolValue(section_, "enable_self_hosted", enable_self_hosted_);
@@ -244,6 +274,8 @@ int ConfigCenter::Save() {
   ini_->SetLongValue(section_, "video_encode_format",
                     static_cast<long>(video_encode_format_));
   ini_->SetLongValue(section_, "turn_mode", static_cast<long>(turn_mode_));
+  ini_->SetLongValue(section_, "direct_start_bitrate_bps", direct_start_bitrate_bps_);
+  ini_->SetLongValue(section_, "relay_start_bitrate_bps", relay_start_bitrate_bps_);
   ini_->SetBoolValue(section_, "enable_turn",
                     turn_mode_ != TURN_MODE::DISABLED);
   ini_->SetBoolValue(section_, "enable_srtp", true);
@@ -292,6 +324,8 @@ std::string ConfigCenter::ExportSharedHostConfig() const {
   host.SetValue(section_, "signal_server_host", signal_server_host_.c_str());
   host.SetLongValue(section_, "signal_server_port", signal_server_port_);
   host.SetLongValue(section_, "turn_mode", static_cast<long>(turn_mode_));
+  host.SetLongValue(section_, "direct_start_bitrate_bps", direct_start_bitrate_bps_);
+  host.SetLongValue(section_, "relay_start_bitrate_bps", relay_start_bitrate_bps_);
   host.SetLongValue(section_, "video_encode_format", static_cast<long>(video_encode_format_));
   host.SetBoolValue(section_, "trusted_devices_only", trusted_devices_only_.load());
   host.SetBoolValue(section_, "lock_on_disconnect", lock_on_disconnect_.load());
@@ -313,6 +347,10 @@ int ConfigCenter::ApplySharedHostConfig(const std::string& contents) {
   const long port = host.GetLongValue(section_, "signal_server_port", 0);
   const long turn = host.GetLongValue(section_, "turn_mode", static_cast<long>(turn_mode_));
   const long codec = host.GetLongValue(section_, "video_encode_format", static_cast<long>(video_encode_format_));
+  const int direct_bps = ReadStartingBitrate(
+      host, section_, "direct_start_bitrate_bps", kDefaultDirectStartBitrateBps);
+  const int relay_bps = ReadStartingBitrate(
+      host, section_, "relay_start_bitrate_bps", kDefaultRelayStartBitrateBps);
   const bool trusted = host.GetBoolValue(section_, "trusted_devices_only", false);
   const bool lock = host.GetBoolValue(section_, "lock_on_disconnect", true);
   MiniRtcSignalServerAddress address{};
@@ -322,12 +360,16 @@ int ConfigCenter::ApplySharedHostConfig(const std::string& contents) {
   if (StoreValues({{"enable_self_hosted", self_hosted ? "true" : "false"},
                    {"signal_server_host", server}, {"signal_server_port", std::to_string(port)},
                    {"turn_mode", std::to_string(turn)}, {"video_encode_format", std::to_string(codec)},
+                   {"direct_start_bitrate_bps", std::to_string(direct_bps)},
+                   {"relay_start_bitrate_bps", std::to_string(relay_bps)},
                    {"trusted_devices_only", trusted ? "true" : "false"},
                    {"lock_on_disconnect", lock ? "true" : "false"}}) != 0) return -1;
   enable_self_hosted_ = self_hosted;
   signal_server_host_ = server;
   signal_server_port_ = static_cast<int>(port);
   turn_mode_ = static_cast<TURN_MODE>(turn);
+  direct_start_bitrate_bps_ = direct_bps;
+  relay_start_bitrate_bps_ = relay_bps;
   video_encode_format_ = static_cast<VIDEO_ENCODE_FORMAT>(codec);
   trusted_devices_only_.store(trusted);
   lock_on_disconnect_.store(lock);
@@ -612,6 +654,14 @@ ConfigCenter::VIDEO_ENCODE_FORMAT ConfigCenter::GetVideoEncodeFormat() const {
 
 ConfigCenter::TURN_MODE ConfigCenter::GetTurnMode() const {
   return turn_mode_;
+}
+
+int ConfigCenter::GetDirectStartBitrateBps() const {
+  return direct_start_bitrate_bps_;
+}
+
+int ConfigCenter::GetRelayStartBitrateBps() const {
+  return relay_start_bitrate_bps_;
 }
 
 bool ConfigCenter::IsForceRelay() const {
